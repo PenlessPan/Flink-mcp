@@ -8,6 +8,20 @@ A Model Context Protocol (MCP) server implementation for Apache Flink that enabl
 
 The Apache Flink MCP Server bridges the gap between AI assistants and Apache Flink clusters by providing a standardized MCP interface. It allows users to perform complex Flink operations through conversational AI, making stream processing management more accessible and intuitive.
 
+## Configuration
+
+Copy `config.yaml.example` to `config.yaml` and edit it before running the server:
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `flink.url` | string | `http://localhost:8081` | Base URL of the Flink REST API |
+| `flink.tls_verify` | boolean | `true` | Verify TLS certificates. Set to `false` for self-signed certs. |
+| `server.max_output_chars` | integer | `50000` | Maximum characters returned by any tool. Longer responses are truncated. |
+
 ## Features
 
 ### 🎯 Core Capabilities
@@ -19,16 +33,30 @@ The Apache Flink MCP Server bridges the gap between AI assistants and Apache Fli
 
 ### 🔧 Available Tools:
 
-1. `initialize_flink_connection` – Connect to Flink REST API
-2. `get_connection_status` – Check connection status
-3. `get_cluster_info` – Overview of the Flink cluster
-4. `list_jobs` – List all Flink jobs with status
-5. `get_job_details` – Comprehensive job details by ID
-6. `get_job_exceptions` – Fetch job-level exceptions
-7. `get_job_metrics` – Fetch metrics for a job
-8. `list_taskmanagers` – List TaskManagers with resources
-9. `list_jar_files` – List uploaded JAR files
-10. `send mail` – (Send an email notification)
+1. `get_cluster_info` – Overview of the Flink cluster
+2. `list_jobs` – List all Flink jobs with status
+3. `get_job_details` – Comprehensive job details by ID
+4. `get_job_exceptions` – Fetch job-level exceptions
+5. `get_job_metrics` – Fetch metrics for a job
+6. `list_taskmanagers` – List TaskManagers with resources
+7. `list_jar_files` – List uploaded JAR files
+8. `get_job_checkpoints` – Checkpoint history and counts for a job
+9. `get_checkpoint_details` – Per-subtask breakdown for a specific checkpoint
+10. `get_vertex_info(job_id, vertex_id, info_category)` – Vertex info by category: `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators`
+11. `get_job_accumulators` – User-defined accumulators for a job
+12. `get_jobmanager_metrics` – List or query JobManager metrics
+13. `get_jobmanager_config` – Full effective cluster configuration
+14. `get_jobmanager_environment` – JVM and environment info from the JobManager
+15. `list_flink_logs` – List available log files on JobManager or TaskManager
+16. `read_flink_logs` – Read a log file with optional tail/filter support
+17. `list_job_ids` – Lightweight job-ID and status list
+18. `get_job_plan` – Dataflow DAG with nodes, edges, and ship strategies
+19. `get_job_checkpoint_config` – Active checkpoint configuration for a job
+20. `get_vertex_details` – Full per-subtask breakdown for a vertex
+21. `get_vertex_flamegraph` – CPU flame graph data for a vertex (Flink 1.17+)
+22. `get_taskmanager_thread_dump` – JVM thread dump grouped by state
+23. `get_cluster_config` – REST/web UI config (version, timezone, refresh)
+24. `list_datasets` – Intermediate batch datasets on the cluster
 
 ---
 
@@ -133,11 +161,14 @@ AI: Let me check your TaskManager status and resource allocation.
 
 ---
 
-#### `send_mail`
+#### `get_vertex_info`
+**Description**: Retrieve information about a specific job vertex / operator.
+**Parameters**:
+- `job_id` (string, required): The Flink job ID
+- `vertex_id` (string, required): The vertex (operator) ID
+- `info_category` (string, required): One of `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators`
 
-**Description**: Send an email notification, such as alerts, status updates, or reports from the Flink MCP server.
-
-
+---
 
 ## Troubleshooting
 

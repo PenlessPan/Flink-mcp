@@ -2,3 +2,4 @@
 fenv/
 .vscode/
 clients/claude/__pycache__/
+config.yaml

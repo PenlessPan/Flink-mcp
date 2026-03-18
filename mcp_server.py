@@ -8,12 +8,8 @@ import argparse
 from fastmcp import FastMCP
 import httpx
 from typing import Dict, List, Any
-
-# mail imports
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import datetime
+import yaml
+from dataclasses import dataclass
 
 
 logging.basicConfig(
@@ -25,66 +21,33 @@ logger = logging.getLogger("flink-mcp-server")
 
 mcp = FastMCP("Apache Flink MCP Server")
 
-# Global state for Flink connection
-FLINK_CONNECTION = {
-    "url": None,
-    "initialized": False
-}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+@dataclass
+class Settings:
+    flink_url: str
+    tls_verify: bool
+    max_output_chars: int
 
 
-def check_initialized():
-    """Helper to verify Flink connection is initialized."""
-    if not FLINK_CONNECTION["initialized"]:
-        return False, "Flink connection not initialized. Please call initialize_flink_connection first."
-    return True, None
+with open("config.yaml") as _f:
+    _cfg = yaml.safe_load(_f)
 
-
-@mcp.tool() 
-async def initialize_flink_connection(flink_url: str) -> str:
-    """
-    Initialize connection to Apache Flink REST API.
-    Must be called before using any other Flink tools.
-    
-    Args:
-        flink_url: Base URL of Flink REST API (e.g., http://localhost:8081)
-    """
-    # Remove trailing slash if present
-    flink_url = flink_url.rstrip('/')
-    
-    # Test the connection
-    try:
-        async with httpx.AsyncClient(verify=False) as client:
-            response = await client.get(f"{flink_url}/overview", timeout=5.0)
-            response.raise_for_status()
-            
-        FLINK_CONNECTION["url"] = flink_url
-        FLINK_CONNECTION["initialized"] = True
-        logger.info(f"Successfully connected to Flink at: {flink_url}")
-        return f"✓ Successfully connected to Flink cluster at {flink_url}"
-    except Exception as e:
-        logger.error(f"Failed to connect to Flink: {e}")
-        return f"✗ Failed to connect to Flink at {flink_url}: {str(e)}"
-
-
-@mcp.tool()
-async def get_connection_status() -> str:
-    """Check if Flink connection is initialized and get current URL."""
-    if FLINK_CONNECTION["initialized"]:
-        return f"✓ Connected to: {FLINK_CONNECTION['url']}"
-    else:
-        return "✗ Not connected. Use initialize_flink_connection to connect."
+settings = Settings(
+    flink_url=_cfg["flink"]["url"].rstrip("/"),
+    tls_verify=_cfg["flink"]["tls_verify"],
+    max_output_chars=_cfg["server"]["max_output_chars"],
+)
 
 
 @mcp.tool()
 async def get_cluster_info() -> str:
     """Fetch an overview of the Flink cluster: jobs, slots, taskmanagers."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/overview"
+    url = f"{settings.flink_url}/overview"
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -107,13 +70,9 @@ async def get_cluster_info() -> str:
 @mcp.tool()
 async def list_jobs() -> str:
     """List all current and recent Flink jobs with their status."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/jobs/overview"
+    url = f"{settings.flink_url}/jobs/overview"
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url)
             response.raise_for_status()
             jobs = response.json().get("jobs", [])
@@ -136,19 +95,15 @@ async def list_jobs() -> str:
 async def get_job_details(job_id: str) -> str:
     """Get comprehensive details of a specific Flink job by job ID including configuration, 
     vertices, metrics, and execution plan."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
     # Fetch both job details and config in parallel
-    details_url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}"
-    config_url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/config"
+    details_url = f"{settings.flink_url}/jobs/{job_id}"
+    config_url = f"{settings.flink_url}/jobs/{job_id}/config"
     
     job_data = None
     config_data = None
     
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             # Fetch job details
             try:
                 details_response = await client.get(details_url)
@@ -466,13 +421,9 @@ def _chunk(seq, n):
 @mcp.tool()
 async def list_taskmanagers() -> str:
     """List all registered TaskManagers in the Flink cluster with detailed resource information."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/taskmanagers"
+    url = f"{settings.flink_url}/taskmanagers"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             tms = response.json().get("taskmanagers", [])
@@ -650,13 +601,9 @@ async def list_taskmanagers() -> str:
 @mcp.tool()
 async def get_job_exceptions(job_id: str) -> str:
     """Fetch exceptions that occurred in the specified job."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/exceptions"
+    url = f"{settings.flink_url}/jobs/{job_id}/exceptions"
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -731,13 +678,9 @@ async def get_job_exceptions(job_id: str) -> str:
 @mcp.tool()
 async def list_jar_files() -> str:
     """List all uploaded JARs in the Flink cluster."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/jars"
+    url = f"{settings.flink_url}/jars"
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url)
             response.raise_for_status()
             jars = response.json().get("files", [])
@@ -755,11 +698,7 @@ async def list_jar_files() -> str:
 @mcp.tool()
 async def get_job_metrics(job_id: str) -> str:
     """Fetch selected useful metrics for a running Flink job; produce a diagnostic summary."""
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    base_url = f"{FLINK_CONNECTION['url'].rstrip('/')}/jobs/{job_id}/metrics"
+    base_url = f"{settings.flink_url.rstrip('/')}/jobs/{job_id}/metrics"
 
     # Curated set for analysis & tuning (kept small for clarity; extend as needed)
     common = [
@@ -815,7 +754,7 @@ async def get_job_metrics(job_id: str) -> str:
             return results
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(10.0)) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=httpx.Timeout(10.0)) as client:
             # 1) discover available metric ids
             r = await client.get(base_url)
             r.raise_for_status()
@@ -943,14 +882,10 @@ async def get_taskmanager_details(taskmanager_id: str) -> str:
     This is more detailed than list_taskmanagers which shows all TaskManagers.
     Use this when you need to deep-dive into a specific TaskManager.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/taskmanagers/{taskmanager_id}"
+    url = f"{settings.flink_url}/taskmanagers/{taskmanager_id}"
     
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             tm = response.json()
@@ -1135,14 +1070,10 @@ async def get_taskmanager_metrics(
     Example:
         metric_names="Status.JVM.CPU.Load,Status.JVM.Memory.Heap.Used"
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    base_url = f"{FLINK_CONNECTION['url']}/taskmanagers/{taskmanager_id}/metrics"
+    base_url = f"{settings.flink_url}/taskmanagers/{taskmanager_id}/metrics"
     
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             if metric_names:
                 # Query specific metrics
                 url = f"{base_url}?get={metric_names}"
@@ -1230,318 +1161,6 @@ async def get_taskmanager_metrics(
         return f"❌ Error getting TaskManager metrics: {str(e)}"
 
 
-@mcp.tool()
-async def get_vertex_backpressure(job_id: str, vertex_id: str) -> str:
-    """Get backpressure information for a specific operator/vertex.
-    
-    Args:
-        job_id: Job ID
-        vertex_id: Vertex/operator ID
-        
-    Returns:
-    - Overall backpressure status (ok, low, high)
-    - Backpressure level/ratio (0.0 to 1.0)
-    - Per-subtask backpressure breakdown
-    - Idle and busy ratios
-    
-    Backpressure indicates when an operator can't keep up with incoming data.
-    - OK: No backpressure, operator processing smoothly
-    - LOW: Minor backpressure, monitor but not critical
-    - HIGH: Severe backpressure, operator is bottleneck - needs optimization!
-    
-    Use this to identify performance bottlenecks in your job.
-    """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-    
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/backpressure"
-    
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            bp_data = response.json()
-        
-        result = []
-        result.append("=" * 70)
-        result.append("BACKPRESSURE ANALYSIS")
-        result.append("=" * 70)
-        result.append(f"Job ID: {job_id}")
-        result.append(f"Vertex ID: {vertex_id}")
-        
-        # Overall status
-        status = bp_data.get('status', 'unknown')
-        bp_level = bp_data.get('backpressureLevel', 'unknown').upper()
-        end_ts = bp_data.get('end-timestamp', 0)
-        
-        result.append(f"\n📊 OVERALL STATUS")
-        result.append(f"  Status: {status}")
-        
-        # Color-code backpressure level
-        if bp_level == 'OK':
-            result.append(f"  Backpressure Level: ✅ {bp_level} - No issues")
-        elif bp_level == 'LOW':
-            result.append(f"  Backpressure Level: ⚡ {bp_level} - Minor pressure")
-        elif bp_level == 'HIGH':
-            result.append(f"  Backpressure Level: 🔴 {bp_level} - BOTTLENECK DETECTED!")
-        else:
-            result.append(f"  Backpressure Level: {bp_level}")
-        
-        if end_ts > 0:
-            from datetime import datetime
-            measurement_time = datetime.fromtimestamp(end_ts / 1000.0)
-            result.append(f"  Measured At: {measurement_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Per-subtask breakdown
-        subtasks = bp_data.get('subtasks', [])
-        if subtasks:
-            result.append(f"\n📋 PER-SUBTASK BREAKDOWN ({len(subtasks)} subtask(s))")
-            
-            for subtask in subtasks:
-                subtask_idx = subtask.get('subtask', 0)
-                subtask_bp_level = subtask.get('backpressureLevel', 'unknown').upper()
-                ratio = subtask.get('ratio', 0)
-                idle_ratio = subtask.get('idleRatio', 0)
-                busy_ratio = subtask.get('busyRatio', 'NaN')
-                
-                result.append(f"\n  Subtask #{subtask_idx}:")
-                
-                if subtask_bp_level == 'OK':
-                    result.append(f"    Status: ✅ {subtask_bp_level}")
-                elif subtask_bp_level == 'LOW':
-                    result.append(f"    Status: ⚡ {subtask_bp_level}")
-                elif subtask_bp_level == 'HIGH':
-                    result.append(f"    Status: 🔴 {subtask_bp_level}")
-                else:
-                    result.append(f"    Status: {subtask_bp_level}")
-                
-                result.append(f"    Backpressure Ratio: {ratio:.2%}" if isinstance(ratio, (int, float)) else f"    Backpressure Ratio: {ratio}")
-                result.append(f"    Idle Ratio: {idle_ratio:.2%}" if isinstance(idle_ratio, (int, float)) else f"    Idle Ratio: {idle_ratio}")
-                
-                if busy_ratio != 'NaN' and isinstance(busy_ratio, (int, float)):
-                    result.append(f"    Busy Ratio: {busy_ratio:.2%}")
-                else:
-                    result.append(f"    Busy Ratio: {busy_ratio}")
-        
-        # Analysis & Recommendations
-        result.append("\n" + "=" * 70)
-        result.append("ANALYSIS & RECOMMENDATIONS")
-        result.append("=" * 70)
-        
-        if bp_level == 'OK':
-            result.append("✅ Operator is processing data smoothly with no backpressure.")
-            result.append("   No action needed.")
-        elif bp_level == 'LOW':
-            result.append("⚡ Minor backpressure detected. Monitor this operator.")
-            result.append("   Consider:")
-            result.append("   - Check if this is temporary or persistent")
-            result.append("   - Monitor for trend over time")
-        elif bp_level == 'HIGH':
-            result.append("🔴 CRITICAL: High backpressure - this operator is a bottleneck!")
-            result.append("   Immediate actions:")
-            result.append("   1. Increase parallelism for this operator")
-            result.append("   2. Optimize operator logic (reduce computation)")
-            result.append("   3. Check if downstream systems are slow")
-            result.append("   4. Review resource allocation (CPU, memory)")
-            result.append("   5. Consider data partitioning/rebalancing")
-        
-        # Check for data skew
-        if subtasks and len(subtasks) > 1:
-            ratios = [s.get('ratio', 0) for s in subtasks if isinstance(s.get('ratio', 0), (int, float))]
-            if ratios and max(ratios) - min(ratios) > 0.3:
-                result.append("\n⚠️  Potential data skew detected!")
-                result.append("   Some subtasks have significantly different backpressure.")
-                result.append("   Consider rebalancing or repartitioning your data.")
-        
-        result.append("=" * 70)
-        
-        return "\n".join(result)
-        
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-        logger.error(f"HTTP error fetching backpressure: {e}")
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        logger.error("Timeout fetching backpressure")
-        return "❌ Request timeout while fetching backpressure"
-    except Exception as e:
-        logger.error(f"Failed to get backpressure: {e}")
-        return f"❌ Error getting backpressure: {str(e)}"
-    
-
-@mcp.tool 
-def send_email_notification(recipient_email: str, content: str, subject: str = "Flink AI Notifications") -> str:
-    """
-    Send email notification using Gmail SMTP.
-    
-    Args:
-        recipient_email: Email address to send notification to
-        content: Email content/body
-        subject: Email subject line (optional)
-    
-    Returns:
-        JSON string indicating email send status
-    """
-    try:
-        # Validate inputs first
-        if not recipient_email or "@" not in recipient_email:
-            return json.dumps({
-                "status": "failed",
-                "error": "Invalid recipient email address"
-            })
-        
-        if not content.strip():
-            return json.dumps({
-                "status": "failed",
-                "error": "Email content cannot be empty"
-            })
-        
-        # Gmail SMTP settings
-        smtp_server = "smtp.gmail.com"
-        smtp_port = 587
-        
-        # Email credentials or get from env
-        sender_email = os.getenv('GMAIL_USER', 'default')
-        sender_password = os.getenv('GMAIL_PASSWORD', 'default')
-
-        
-        # Create email message
-        message = MIMEMultipart()
-        message["From"] = sender_email
-        message["To"] = recipient_email
-        message["Subject"] = subject
-        
-        # Simple text email body
-        email_body = f"""Flink AI Notification
-===================
-
-{content}
-
----
-Sent by Flink AI at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        
-        message.attach(MIMEText(email_body, "plain"))
-        
-        # Send email via Gmail SMTP
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()  # Enable encryption
-        server.login(sender_email, sender_password)
-        
-        # Send the email
-        text = message.as_string()
-        server.sendmail(sender_email, recipient_email, text)
-        server.quit()
-        
-        return json.dumps({
-            "status": "sent",
-            "message": "Email sent successfully",
-            "recipient": recipient_email,
-            "subject": subject,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-        
-    except smtplib.SMTPAuthenticationError:
-        return json.dumps({
-            "status": "failed",
-            "error": "Gmail authentication failed. Check email/password or enable 2FA and use App Password"
-        })
-    except Exception as e:
-        return json.dumps({
-            "status": "failed",
-            "error": f"Failed to send email: {str(e)}"
-        })
-        
-
-@mcp.tool()
-async def get_job_checkpoints(job_id: str) -> str:
-    """Get checkpoint history and statistics for a Flink job.
-
-    Args:
-        job_id: The Flink job ID.
-
-    Returns checkpoint counts (completed, failed, in-progress), latest completed
-    checkpoint details, and full history list.
-    """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/checkpoints"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(url)
-            if response.status_code == 404:
-                return f"❌ Job not found: {job_id}"
-            response.raise_for_status()
-            data = response.json()
-
-        counts = data.get("counts", {})
-        latest = data.get("latest", {})
-        history = data.get("history", [])
-
-        lines = []
-        lines.append("=" * 70)
-        lines.append(f"CHECKPOINT OVERVIEW — Job {job_id}")
-        lines.append("=" * 70)
-
-        lines.append("\nCounts:")
-        lines.append(f"  Completed:   {counts.get('completed', 0)}")
-        lines.append(f"  Failed:      {counts.get('failed', 0)}")
-        lines.append(f"  In-Progress: {counts.get('in_progress', 0)}")
-        lines.append(f"  Restored:    {counts.get('restored', 0)}")
-        lines.append(f"  Total:       {counts.get('total', 0)}")
-
-        completed = latest.get("completed")
-        if completed:
-            lines.append("\nLatest Completed Checkpoint:")
-            lines.append(f"  ID:            {completed.get('id', 'N/A')}")
-            lines.append(f"  Status:        {completed.get('status', 'N/A')}")
-            lines.append(f"  Duration:      {_format_duration(completed.get('end_to_end_duration', 0))}")
-            lines.append(f"  State Size:    {_format_bytes(completed.get('state_size', 0))}")
-            lines.append(f"  Trigger Time:  {_format_timestamp(completed.get('trigger_timestamp', 0))}")
-            ext_path = completed.get("external_path", "")
-            lines.append(f"  External Path: {ext_path if ext_path else 'N/A'}")
-
-        savepoint = latest.get("savepoint")
-        if savepoint:
-            lines.append("\nLatest Savepoint:")
-            lines.append(f"  ID:            {savepoint.get('id', 'N/A')}")
-            lines.append(f"  Duration:      {_format_duration(savepoint.get('end_to_end_duration', 0))}")
-            lines.append(f"  State Size:    {_format_bytes(savepoint.get('state_size', 0))}")
-            ext_path = savepoint.get("external_path", "")
-            lines.append(f"  External Path: {ext_path if ext_path else 'N/A'}")
-
-        if history:
-            lines.append(f"\nCheckpoint History ({len(history)} entries):")
-            lines.append(f"  {'ID':<8} {'Status':<12} {'Trigger Time':<22} {'Duration':<14} {'State Size'}")
-            lines.append("  " + "-" * 70)
-            for ckpt in history:
-                ckpt_id = ckpt.get("id", "?")
-                status = ckpt.get("status", "?")
-                trigger_ts = _format_timestamp(ckpt.get("trigger_timestamp", 0))
-                duration = _format_duration(ckpt.get("end_to_end_duration", 0))
-                state_size = _format_bytes(ckpt.get("state_size", 0))
-                lines.append(f"  {ckpt_id:<8} {status:<12} {trigger_ts:<22} {duration:<14} {state_size}")
-        else:
-            lines.append("\nNo checkpoint history available.")
-
-        lines.append("=" * 70)
-        return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"❌ Job not found: {job_id}"
-        logger.error(f"HTTP error fetching checkpoints: {e}")
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        logger.error("Timeout fetching checkpoints")
-        return "❌ Request timeout while fetching checkpoints"
-    except Exception as e:
-        logger.error(f"Failed to get checkpoints: {e}")
-        return f"❌ Error getting checkpoints: {str(e)}"
-
 
 @mcp.tool()
 async def get_checkpoint_details(job_id: str, checkpoint_id: int) -> str:
@@ -1554,13 +1173,9 @@ async def get_checkpoint_details(job_id: str, checkpoint_id: int) -> str:
     Returns per-operator/subtask checkpoint duration, state size, and status.
     Useful for pinpointing which operator is causing checkpoint delays.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/checkpoints/details/{checkpoint_id}"
+    url = f"{settings.flink_url}/jobs/{job_id}/checkpoints/details/{checkpoint_id}"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             if response.status_code == 404:
                 return f"❌ Checkpoint {checkpoint_id} not found for job {job_id}"
@@ -1614,104 +1229,6 @@ async def get_checkpoint_details(job_id: str, checkpoint_id: int) -> str:
         return f"❌ Error getting checkpoint details: {str(e)}"
 
 
-@mcp.tool()
-async def get_vertex_metrics(
-    job_id: str,
-    vertex_id: str,
-    metric_names: Optional[str] = None,
-) -> str:
-    """Get metrics for a specific operator/vertex.
-
-    Args:
-        job_id: The Flink job ID.
-        vertex_id: The vertex/operator ID.
-        metric_names: Optional comma-separated metric names to query.
-                      If omitted, lists all available metric IDs.
-
-    Key metrics: numRecordsIn, numRecordsOut, numBytesIn, numBytesOut,
-    busyTimeMsPerSecond, idleTimeMsPerSecond, backPressuredTimeMsPerSecond.
-    """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    base_url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/metrics"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            if metric_names:
-                url = f"{base_url}?get={metric_names}"
-                response = await client.get(url)
-                if response.status_code == 404:
-                    return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-                response.raise_for_status()
-                metrics = response.json()
-
-                lines = []
-                lines.append("=" * 70)
-                lines.append(f"VERTEX METRICS — {vertex_id}")
-                lines.append("=" * 70)
-                for m in metrics:
-                    mid = m.get("id", "?")
-                    val = m.get("value", "N/A")
-                    # Format bytes-based metrics
-                    if "Bytes" in mid:
-                        try:
-                            val = _format_bytes(float(val))
-                        except (ValueError, TypeError):
-                            pass
-                    # Format time-based metrics
-                    elif "TimeMsPerSecond" in mid or "busyTime" in mid or "idleTime" in mid or "backPressuredTime" in mid:
-                        try:
-                            val = f"{float(val):.2f} ms/s"
-                        except (ValueError, TypeError):
-                            pass
-                    lines.append(f"  {mid}: {val}")
-                lines.append("=" * 70)
-                return "\n".join(lines)
-            else:
-                response = await client.get(base_url)
-                if response.status_code == 404:
-                    return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-                response.raise_for_status()
-                metrics = response.json()
-
-                lines = []
-                lines.append("=" * 70)
-                lines.append(f"AVAILABLE METRICS — Vertex {vertex_id}")
-                lines.append("=" * 70)
-                lines.append(f"\nTotal metrics available: {len(metrics)}\n")
-
-                categories: dict = {}
-                for m in metrics:
-                    mid = m.get("id", "")
-                    parts = mid.split(".")
-                    cat = ".".join(parts[:2]) if len(parts) >= 2 else "Other"
-                    categories.setdefault(cat, []).append(mid)
-
-                for cat in sorted(categories.keys()):
-                    lines.append(f"{cat}:")
-                    for mid in sorted(categories[cat]):
-                        lines.append(f"  - {mid}")
-
-                lines.append("\n" + "=" * 70)
-                lines.append("💡 TIP: To query specific metrics, pass metric_names as a comma-separated string.")
-                lines.append("   Key metrics: numRecordsIn, numRecordsOut, numBytesIn, numBytesOut,")
-                lines.append("   busyTimeMsPerSecond, idleTimeMsPerSecond, backPressuredTimeMsPerSecond")
-                lines.append("=" * 70)
-                return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-        logger.error(f"HTTP error fetching vertex metrics: {e}")
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        logger.error("Timeout fetching vertex metrics")
-        return "❌ Request timeout while fetching vertex metrics"
-    except Exception as e:
-        logger.error(f"Failed to get vertex metrics: {e}")
-        return f"❌ Error getting vertex metrics: {str(e)}"
-
 
 @mcp.tool()
 async def get_job_accumulators(job_id: str) -> str:
@@ -1722,13 +1239,9 @@ async def get_job_accumulators(job_id: str) -> str:
 
     Returns each accumulator's name, type, and value.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/accumulators"
+    url = f"{settings.flink_url}/jobs/{job_id}/accumulators"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             if response.status_code == 404:
                 return f"❌ Job not found: {job_id}"
@@ -1779,173 +1292,65 @@ async def get_job_accumulators(job_id: str) -> str:
 
 
 @mcp.tool()
-async def get_vertex_subtask_times(job_id: str, vertex_id: str) -> str:
-    """Get per-subtask timing information for a vertex/operator.
+async def get_vertex_info(job_id: str, vertex_id: str, info_category: str) -> str:
+    """
+    Retrieve information about a specific job vertex / operator.
 
     Args:
         job_id: The Flink job ID.
-        vertex_id: The vertex/operator ID.
-
-    Returns per-subtask host, and timestamps for each state transition
-    (CREATED, SCHEDULED, DEPLOYING, RUNNING, etc.). Flags subtasks with
-    significantly different RUNNING durations as potential data skew.
+        vertex_id: The vertex (operator) ID.
+        info_category: What to retrieve. One of:
+            - "backpressure"      → Back-pressure ratio sampled across subtasks
+                                    (GET /jobs/{job_id}/vertices/{vertex_id}/backpressure)
+            - "metrics"           → Available or queried metrics for the vertex
+                                    (GET /jobs/{job_id}/vertices/{vertex_id}/metrics)
+            - "subtask_times"     → Per-subtask state-transition timestamps and durations
+                                    (GET /jobs/{job_id}/vertices/{vertex_id}/subtasktimes)
+            - "taskmanager_stats" → Per-TaskManager I/O stats for this vertex
+                                    (GET /jobs/{job_id}/vertices/{vertex_id}/taskmanagers)
+            - "accumulators"      → Per-subtask user-defined accumulators
+                                    (GET /jobs/{job_id}/vertices/{vertex_id}/accumulators)
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
+    CATEGORIES = {
+        "backpressure": f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/backpressure",
+        "metrics": f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/metrics",
+        "subtask_times": f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/subtasktimes",
+        "taskmanager_stats": f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/taskmanagers",
+        "accumulators": f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/accumulators",
+    }
 
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/subtasktimes"
+    if info_category not in CATEGORIES:
+        return (
+            f"❌ Unknown info_category '{info_category}'. "
+            f"Valid options: {', '.join(CATEGORIES)}"
+        )
+
+    url = CATEGORIES[info_category]
+
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
-            if response.status_code == 404:
-                return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
             response.raise_for_status()
             data = response.json()
 
-        subtasks = data.get("subtasks", [])
-        vertex_name = data.get("name", vertex_id)
-
-        if not subtasks:
-            return f"No subtask timing data found for vertex {vertex_id}."
-
-        lines = []
-        lines.append("=" * 70)
-        lines.append(f"SUBTASK TIMING — {vertex_name}")
-        lines.append(f"Job: {job_id}  Vertex: {vertex_id}")
-        lines.append("=" * 70)
-
-        # Collect RUNNING start times to detect skew
-        running_starts: list = []
-        for st in subtasks:
-            timestamps = st.get("timestamps", {})
-            running_ts = timestamps.get("RUNNING", 0)
-            if running_ts and running_ts > 0:
-                running_starts.append(running_ts)
-
-        for st in subtasks:
-            idx = st.get("subtask", "?")
-            host = st.get("host", "N/A")
-            duration = st.get("duration", 0)
-            lines.append(f"\n  Subtask #{idx}  ({host})  — Total: {_format_duration(duration)}")
-
-            timestamps = st.get("timestamps", {})
-            for state, ts in timestamps.items():
-                if ts and ts > 0:
-                    lines.append(f"    {state:<14}: {_format_timestamp(ts)}")
-
-        # Skew detection: flag if max running start differs from min by > 30s
-        if len(running_starts) > 1:
-            skew_ms = max(running_starts) - min(running_starts)
-            if skew_ms > 30_000:
-                lines.append(
-                    f"\n⚠️  Potential data skew detected: subtasks started RUNNING up to "
-                    f"{_format_duration(skew_ms)} apart."
-                )
-
-        lines.append("\n" + "=" * 70)
-        return "\n".join(lines)
+        output = (
+            f"Vertex {info_category} — Job {job_id} / Vertex {vertex_id}\n"
+            + "=" * 70 + "\n"
+            + json.dumps(data, indent=2)
+        )
+        if len(output) > settings.max_output_chars:
+            output = output[:settings.max_output_chars] + f"\n\n⚠️ Output truncated at {settings.max_output_chars} characters."
+        return output
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-        logger.error(f"HTTP error fetching subtask times: {e}")
         return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
     except httpx.TimeoutException:
-        logger.error("Timeout fetching subtask times")
-        return "❌ Request timeout while fetching subtask times"
+        return f"❌ Request timeout fetching {info_category} for vertex {vertex_id}."
     except Exception as e:
-        logger.error(f"Failed to get subtask times: {e}")
-        return f"❌ Error getting subtask times: {str(e)}"
-
-
-@mcp.tool()
-async def get_vertex_taskmanager_stats(job_id: str, vertex_id: str) -> str:
-    """Get aggregated I/O and buffer stats per TaskManager for a specific vertex.
-
-    Args:
-        job_id: The Flink job ID.
-        vertex_id: The vertex/operator ID.
-
-    Returns per-TaskManager host, status, records/bytes in/out, and
-    accumulated busy/idle/backpressure time.
-    """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/taskmanagers"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(url)
-            if response.status_code == 404:
-                return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-            response.raise_for_status()
-            data = response.json()
-
-        taskmanagers = data.get("taskmanagers", [])
-        vertex_name = data.get("name", vertex_id)
-
-        if not taskmanagers:
-            return f"No TaskManager stats found for vertex {vertex_id}."
-
-        lines = []
-        lines.append("=" * 70)
-        lines.append(f"TASKMANAGER STATS — {vertex_name}")
-        lines.append(f"Job: {job_id}  Vertex: {vertex_id}")
-        lines.append("=" * 70)
-
-        for tm in taskmanagers:
-            host = tm.get("host", "N/A")
-            status = tm.get("status", "N/A")
-            lines.append(f"\n  Host:   {host}")
-            lines.append(f"  Status: {status}")
-
-            metrics = tm.get("metrics", {})
-            if metrics:
-                rec_in = metrics.get("read-records", 0)
-                rec_out = metrics.get("write-records", 0)
-                bytes_in = metrics.get("read-bytes", 0)
-                bytes_out = metrics.get("write-bytes", 0)
-                busy = metrics.get("accumulated-busy-time", 0)
-                idle = metrics.get("accumulated-idle-time", 0)
-                bp = metrics.get("accumulated-backpressured-time", 0)
-
-                lines.append(f"  Records In:    {rec_in:,}")
-                lines.append(f"  Records Out:   {rec_out:,}")
-                lines.append(f"  Bytes In:      {_format_bytes(bytes_in)}")
-                lines.append(f"  Bytes Out:     {_format_bytes(bytes_out)}")
-                lines.append(f"  Busy Time:     {_format_duration(busy)}")
-                lines.append(f"  Idle Time:     {_format_duration(idle)}")
-                if bp and bp > 0:
-                    lines.append(f"  ⚠️  Backpressure: {_format_duration(bp)}")
-                else:
-                    lines.append(f"  Backpressure:  {_format_duration(bp)}")
-
-            start_time = tm.get("start-time", 0)
-            end_time = tm.get("end-time", -1)
-            duration = tm.get("duration", 0)
-            if start_time > 0:
-                lines.append(f"  Start Time:    {_format_timestamp(start_time)}")
-            if end_time > 0:
-                lines.append(f"  End Time:      {_format_timestamp(end_time)}")
-            if duration > 0:
-                lines.append(f"  Duration:      {_format_duration(duration)}")
-
-        lines.append("\n" + "=" * 70)
-        return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-        logger.error(f"HTTP error fetching vertex TM stats: {e}")
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        logger.error("Timeout fetching vertex TM stats")
-        return "❌ Request timeout while fetching vertex TaskManager stats"
-    except Exception as e:
-        logger.error(f"Failed to get vertex TM stats: {e}")
-        return f"❌ Error getting vertex TaskManager stats: {str(e)}"
+        logger.error(f"Failed to get vertex {info_category}: {e}")
+        return f"❌ Error fetching vertex {info_category}: {str(e)}"
 
 
 @mcp.tool()
@@ -1960,13 +1365,9 @@ async def get_jobmanager_metrics(metric_names: Optional[str] = None) -> str:
     Status.JVM.GarbageCollector.*.Count, Status.JVM.GarbageCollector.*.Time,
     Status.JVM.Threads.Count, Status.JVM.CPU.Load.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    base_url = f"{FLINK_CONNECTION['url']}/jobmanager/metrics"
+    base_url = f"{settings.flink_url}/jobmanager/metrics"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             if metric_names:
                 url = f"{base_url}?get={metric_names}"
                 response = await client.get(url)
@@ -2047,13 +1448,9 @@ async def get_jobmanager_config() -> str:
     Returns all configuration key-value pairs grouped by key prefix
     (e.g. state.*, execution.*, taskmanager.*, rest.*).
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobmanager/config"
+    url = f"{settings.flink_url}/jobmanager/config"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             entries = response.json()
@@ -2085,7 +1482,10 @@ async def get_jobmanager_config() -> str:
             lines.append("")
 
         lines.append("=" * 70)
-        return "\n".join(lines)
+        output = "\n".join(lines)
+        if len(output) > settings.max_output_chars:
+            output = output[:settings.max_output_chars] + f"\n\n⚠️ Output truncated at {settings.max_output_chars} characters."
+        return output
 
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP error fetching JobManager config: {e}")
@@ -2105,13 +1505,9 @@ async def get_jobmanager_environment() -> str:
     Returns JVM version, max heap size, classpath entries, and environment
     variables as reported by the JobManager.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobmanager/environment"
+    url = f"{settings.flink_url}/jobmanager/environment"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2150,7 +1546,10 @@ async def get_jobmanager_environment() -> str:
                 lines.append(f"  {entry.get('key', '?')} = {entry.get('value', '?')}")
 
         lines.append("\n" + "=" * 70)
-        return "\n".join(lines)
+        output = "\n".join(lines)
+        if len(output) > settings.max_output_chars:
+            output = output[:settings.max_output_chars] + f"\n\n⚠️ Output truncated at {settings.max_output_chars} characters."
+        return output
 
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP error fetching JobManager environment: {e}")
@@ -2162,71 +1561,6 @@ async def get_jobmanager_environment() -> str:
         logger.error(f"Failed to get JobManager environment: {e}")
         return f"❌ Error getting JobManager environment: {str(e)}"
 
-
-@mcp.tool()
-async def get_vertex_accumulators(job_id: str, vertex_id: str) -> str:
-    """Get per-subtask accumulator values for a specific vertex.
-
-    Args:
-        job_id: The Flink job ID.
-        vertex_id: The vertex/operator ID.
-
-    Returns accumulator name, type, and value grouped by subtask index.
-    """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/accumulators"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(url)
-            if response.status_code == 404:
-                return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-            response.raise_for_status()
-            data = response.json()
-
-        subtask_accumulators = data.get("subtask-accumulators", [])
-
-        if not subtask_accumulators:
-            return f"No accumulator data found for vertex {vertex_id} in job {job_id}."
-
-        lines = []
-        lines.append("=" * 70)
-        lines.append(f"VERTEX ACCUMULATORS — {vertex_id}")
-        lines.append(f"Job: {job_id}")
-        lines.append("=" * 70)
-
-        for entry in subtask_accumulators:
-            subtask_idx = entry.get("subtask", "?")
-            attempt = entry.get("attempt", "?")
-            host = entry.get("host", "N/A")
-            accumulators = entry.get("user-accumulators", [])
-
-            lines.append(f"\n  Subtask #{subtask_idx}  (attempt {attempt})  — {host}")
-            if accumulators:
-                for acc in accumulators:
-                    lines.append(f"    Name:  {acc.get('name', 'N/A')}")
-                    lines.append(f"    Type:  {acc.get('type', 'N/A')}")
-                    lines.append(f"    Value: {acc.get('value', 'N/A')}")
-                    lines.append("")
-            else:
-                lines.append("    No accumulators.")
-
-        lines.append("=" * 70)
-        return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"❌ Job or vertex not found: {job_id} / {vertex_id}"
-        logger.error(f"HTTP error fetching vertex accumulators: {e}")
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        logger.error("Timeout fetching vertex accumulators")
-        return "❌ Request timeout while fetching vertex accumulators"
-    except Exception as e:
-        logger.error(f"Failed to get vertex accumulators: {e}")
-        return f"❌ Error getting vertex accumulators: {str(e)}"
 
 
 @mcp.tool()
@@ -2241,11 +1575,7 @@ async def list_flink_logs(
         target: Either "jobmanager" (default) or "taskmanager".
         taskmanager_id: Required when target is "taskmanager". The TaskManager ID.
     """
-    ok, err = check_initialized()
-    if not ok:
-        return err
-
-    base = FLINK_CONNECTION["url"]
+    base = settings.flink_url
 
     if target == "taskmanager":
         if not taskmanager_id:
@@ -2255,7 +1585,7 @@ async def list_flink_logs(
         url = f"{base}/jobmanager/logs"
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url, timeout=10.0)
             response.raise_for_status()
             data = response.json()
@@ -2312,11 +1642,7 @@ async def read_flink_logs(
                       (e.g., "ERROR", "WARN", "INFO", "DEBUG").
         keyword: If set, return only lines containing this substring (case-insensitive).
     """
-    ok, err = check_initialized()
-    if not ok:
-        return err
-
-    base = FLINK_CONNECTION["url"]
+    base = settings.flink_url
 
     if target == "taskmanager":
         if not taskmanager_id:
@@ -2326,7 +1652,7 @@ async def read_flink_logs(
         url = f"{base}/jobmanager/logs/{log_file}"
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify) as client:
             response = await client.get(url, timeout=30.0)
             response.raise_for_status()
             content = response.text
@@ -2387,13 +1713,9 @@ async def list_job_ids() -> str:
     List all job IDs known to the cluster with their current status.
     Lighter alternative to list_jobs — hits GET /jobs instead of /jobs/overview.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs"
+    url = f"{settings.flink_url}/jobs"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2431,13 +1753,9 @@ async def get_job_plan(job_id: str) -> str:
     Args:
         job_id: The Flink job ID.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/plan"
+    url = f"{settings.flink_url}/jobs/{job_id}/plan"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2516,13 +1834,9 @@ async def get_job_checkpoint_config(job_id: str) -> str:
     Args:
         job_id: The Flink job ID.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/checkpoints/config"
+    url = f"{settings.flink_url}/jobs/{job_id}/checkpoints/config"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             cfg = response.json()
@@ -2578,13 +1892,9 @@ async def get_vertex_details(job_id: str, vertex_id: str) -> str:
         job_id: The Flink job ID.
         vertex_id: The vertex (operator) ID.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}"
+    url = f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2686,22 +1996,21 @@ async def get_vertex_flamegraph(job_id: str, vertex_id: str) -> str:
         job_id: The Flink job ID.
         vertex_id: The vertex (operator) ID.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/jobs/{job_id}/vertices/{vertex_id}/flamegraph"
+    url = f"{settings.flink_url}/jobs/{job_id}/vertices/{vertex_id}/flamegraph"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
 
-        return (
+        output = (
             f"Flame Graph — Vertex {vertex_id}  (Job {job_id})\n"
             + "=" * 70 + "\n"
             + json.dumps(data, indent=2)
         )
+        if len(output) > settings.max_output_chars:
+            output = output[:settings.max_output_chars] + f"\n\n⚠️ Output truncated at {settings.max_output_chars} characters."
+        return output
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code in (404, 405):
@@ -2731,13 +2040,9 @@ async def get_taskmanager_thread_dump(taskmanager_id: str) -> str:
     Args:
         taskmanager_id: The TaskManager ID (from list_taskmanagers).
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/taskmanagers/{taskmanager_id}/thread-dump"
+    url = f"{settings.flink_url}/taskmanagers/{taskmanager_id}/thread-dump"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2804,7 +2109,10 @@ async def get_taskmanager_thread_dump(taskmanager_id: str) -> str:
                 lines.append("")
 
         lines.append("=" * 70)
-        return "\n".join(lines)
+        output = "\n".join(lines)
+        if len(output) > settings.max_output_chars:
+            output = output[:settings.max_output_chars] + f"\n\n⚠️ Output truncated at {settings.max_output_chars} characters."
+        return output
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
@@ -2825,13 +2133,9 @@ async def get_cluster_config() -> str:
     related web-layer settings. This is distinct from get_jobmanager_config,
     which returns the full effective cluster/JobManager configuration.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/config"
+    url = f"{settings.flink_url}/config"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2881,13 +2185,9 @@ async def list_datasets() -> str:
     Returns a clear message when no datasets exist, which is normal
     for streaming-only clusters.
     """
-    is_init, error_msg = check_initialized()
-    if not is_init:
-        return error_msg
-
-    url = f"{FLINK_CONNECTION['url']}/datasets"
+    url = f"{settings.flink_url}/datasets"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=settings.tls_verify, timeout=10.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -2930,11 +2230,10 @@ async def list_datasets() -> str:
 def main():
     try:
         logger.info("Starting Flink MCP server...")
+        logger.info(f"Flink URL: {settings.flink_url}")
         logger.info("=" * 60)
         logger.info("Available tools:")
         logger.info("-" * 60)
-        logger.info("  🔌 initialize_flink_connection: Connect to Flink REST API")
-        logger.info("  📊 get_connection_status: Check connection status")
         logger.info("  🏢 get_cluster_info: Overview of the Flink cluster")
         logger.info("  📋 list_jobs: List all Flink jobs with status")
         logger.info("  🔍 get_job_details: Comprehensive job details by ID")
@@ -2942,18 +2241,14 @@ def main():
         logger.info("  📈 get_job_metrics: Fetch metrics for a job")
         logger.info("  💻 list_taskmanagers: List TaskManagers with resources")
         logger.info("  📦 list_jar_files: List uploaded JAR files")
-        logger.info("  📧 send_mail: Send an email notification")
         logger.info("-" * 60)
         logger.info("  🔖 get_job_checkpoints: Checkpoint history & counts for a job")
         logger.info("  🔬 get_checkpoint_details: Per-subtask breakdown for a checkpoint")
-        logger.info("  📐 get_vertex_metrics: List/query metrics for a specific vertex")
+        logger.info("  🔎 get_vertex_info: Vertex info by category (backpressure/metrics/subtask_times/taskmanager_stats/accumulators)")
         logger.info("  🧮 get_job_accumulators: User-defined accumulators for a job")
-        logger.info("  ⏱️  get_vertex_subtask_times: Per-subtask state transition timings")
-        logger.info("  🗄️  get_vertex_taskmanager_stats: Per-TM I/O stats for a vertex")
         logger.info("  🖥️  get_jobmanager_metrics: List/query JobManager metrics")
         logger.info("  ⚙️  get_jobmanager_config: Full effective cluster configuration")
         logger.info("  🌍 get_jobmanager_environment: JVM/env info from JobManager")
-        logger.info("  🧮 get_vertex_accumulators: Per-subtask accumulators for a vertex")
         logger.info("  📄 list_flink_logs: List available log files on JobManager/TaskManager")
         logger.info("  📜 read_flink_logs: Read a log file with optional tail/filter support")
         logger.info("-" * 60)

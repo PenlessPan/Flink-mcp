@@ -1,0 +1,16 @@
+# Apache Flink MCP Server — Configuration
+#
+# Copy this file to config.yaml and edit before running the server.
+
+flink:
+  # Base URL of the Flink REST API (JobManager)
+  url: "http://localhost:8081"
+
+  # Whether to verify TLS certificates when connecting to Flink.
+  # Set to false if your cluster uses self-signed certificates.
+  tls_verify: true
+
+server:
+  # Maximum number of characters returned by any single tool call.
+  # Responses longer than this are truncated with a warning.
+  max_output_chars: 50000
