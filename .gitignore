@@ -1,0 +1,4 @@
+.continue/
+fenv/
+.vscode/
+clients/claude/__pycache__/
