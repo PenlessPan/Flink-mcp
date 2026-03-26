@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import List, Dict, Any
 
@@ -32,43 +33,6 @@ async def list_jobs() -> str:
     except Exception as e:
         logger.error(f"Failed to fetch job list: {e}")
         return f"Error fetching jobs: {str(e)}"
-
-
-@mcp.tool()
-async def list_job_ids() -> str:
-    """
-    List all job IDs known to the cluster with their current status.
-    Lighter alternative to list_jobs — hits GET /jobs instead of /jobs/overview.
-    """
-    url = f"{get_settings()['url']}/jobs"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-
-        jobs = data.get("jobs", [])
-        if not jobs:
-            return "No jobs found on the cluster."
-
-        lines = ["Job IDs on Cluster", "=" * 50]
-        for job in jobs:
-            jid = job.get("id", "N/A")
-            status = job.get("status", "UNKNOWN")
-            lines.append(f"  {jid}  [{status}]")
-        lines.append("=" * 50)
-        lines.append(f"Total: {len(jobs)} job(s)")
-        return "\n".join(lines)
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return "❌ /jobs endpoint not found."
-        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
-    except httpx.TimeoutException:
-        return "❌ Request timeout while listing job IDs."
-    except Exception as e:
-        logger.error(f"Failed to list job IDs: {e}")
-        return f"❌ Error listing job IDs: {str(e)}"
 
 
 @mcp.tool()
@@ -753,3 +717,392 @@ async def get_job_checkpoint_config(job_id: str) -> str:
     except Exception as e:
         logger.error(f"Failed to get checkpoint config for {job_id}: {e}")
         return f"❌ Error fetching checkpoint config: {str(e)}"
+
+
+@mcp.tool()
+async def diagnose_job(job_id: str) -> str:
+    """
+    Run a full diagnostic on a Flink job and return a unified health report.
+
+    Concurrently fetches exceptions, metrics, checkpoint history, and job
+    details, then presents them in order of diagnostic priority with a
+    one-line health summary at the top.
+
+    Args:
+        job_id: The Flink job ID to diagnose.
+    """
+    from .checkpoint_tools import get_job_checkpoints
+
+    base = get_settings()["url"]
+
+    async def _fetch_overview():
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                r = await client.get(f"{base}/jobs/{job_id}")
+                if r.status_code == 200:
+                    return r.json()
+        except Exception:
+            pass
+        return {}
+
+    overview, details_str, exceptions_str, metrics_str, checkpoints_str = await asyncio.gather(
+        _fetch_overview(),
+        get_job_details(job_id),
+        get_job_exceptions(job_id),
+        get_job_metrics(job_id),
+        get_job_checkpoints(job_id),
+    )
+
+    # --- derive health indicators ---
+    state = overview.get("state", "UNKNOWN")
+
+    restarts = 0
+    for line in metrics_str.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Restarts:"):
+            try:
+                restarts = int(stripped.split(":")[1].strip().split()[0])
+            except Exception:
+                pass
+            break
+
+    ckpt_failed = 0
+    for line in checkpoints_str.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Failed:"):
+            try:
+                ckpt_failed = int(stripped.split(":")[1].strip())
+            except Exception:
+                pass
+            break
+
+    has_exceptions = "No exceptions found" not in exceptions_str
+
+    if state == "FAILED":
+        health = "FAILED — job terminated with errors"
+    elif state == "CANCELED":
+        health = "CANCELED"
+    elif state == "FINISHED":
+        health = "FINISHED" + (" — with checkpoint failures" if ckpt_failed > 0 else " — completed normally")
+    elif state == "RUNNING":
+        issues = []
+        if has_exceptions:
+            issues.append("exceptions present")
+        if restarts > 0:
+            issues.append(f"{restarts} restart{'s' if restarts != 1 else ''}")
+        if ckpt_failed > 0:
+            issues.append(f"{ckpt_failed} checkpoint failure{'s' if ckpt_failed != 1 else ''}")
+        health = ("DEGRADED — " + ", ".join(issues)) if issues else "HEALTHY — running normally"
+    else:
+        health = state
+
+    sep = "=" * 70
+
+    report = [
+        sep,
+        f"DIAGNOSTIC REPORT — Job {job_id}",
+        sep,
+        f"Health: {health}",
+        "",
+        "--- EXCEPTIONS " + "-" * 55,
+        exceptions_str,
+        "",
+        "--- METRICS / STABILITY " + "-" * 46,
+        metrics_str,
+        "",
+        "--- CHECKPOINT HEALTH " + "-" * 48,
+        checkpoints_str,
+        "",
+        "--- JOB DETAILS " + "-" * 54,
+        details_str,
+        sep,
+    ]
+
+    return "\n".join(report)
+
+
+@mcp.tool()
+async def get_job_history(job_name: str) -> str:
+    """
+    Show the run history for a job by name (case-insensitive substring match).
+
+    Fetches all jobs from GET /jobs/overview, filters by the given name
+    substring, then presents:
+    - RUNS TABLE: every matched run with state, duration, start/end times
+    - STABILITY SUMMARY: success rate and average duration of completed runs
+    - FAILURE PATTERN: list of failed/cancelled runs
+
+    If no jobs match, lists all available job names to help the caller
+    choose the correct name.
+
+    Args:
+        job_name: Case-insensitive substring of the job name to search for.
+    """
+    url = f"{get_settings()['url']}/jobs/overview"
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            all_jobs = r.json().get("jobs", [])
+    except Exception as e:
+        logger.error(f"Failed to fetch job overview: {e}")
+        return f"❌ Error fetching jobs: {str(e)}"
+
+    needle = job_name.lower()
+    matched = [j for j in all_jobs if needle in j.get("name", "").lower()]
+
+    if not matched:
+        names = sorted({j.get("name", "") for j in all_jobs if j.get("name")})
+        if names:
+            name_list = "\n".join(f"  - {n}" for n in names)
+            return (
+                f"No jobs found matching '{job_name}'.\n\n"
+                f"Available job names:\n{name_list}"
+            )
+        return f"No jobs found matching '{job_name}' and no jobs exist in the cluster."
+
+    # Sort by start time descending (most recent first)
+    matched.sort(key=lambda j: j.get("start-time", 0), reverse=True)
+
+    sep = "=" * 70
+    lines = [sep, f"JOB HISTORY — '{job_name}' ({len(matched)} run(s))", sep]
+
+    # ── RUNS TABLE ────────────────────────────────────────────────────────
+    lines.append("\n── RUNS TABLE ──────────────────────────────────────────────────")
+    lines.append(f"  {'#':<3}  {'State':<12}  {'Duration':>12}  {'Start':<20}  {'End':<20}  Name")
+    lines.append("  " + "-" * 85)
+
+    durations_completed = []
+    for idx, j in enumerate(matched, 1):
+        state = j.get("state", "?")
+        start_ms = j.get("start-time", -1)
+        end_ms = j.get("end-time", -1)
+        dur_ms = j.get("duration", 0)
+        start_str = format_timestamp(start_ms) if start_ms > 0 else "N/A"
+        end_str = format_timestamp(end_ms) if end_ms > 0 else "running"
+        dur_str = format_duration(dur_ms) if dur_ms else "N/A"
+        name = j.get("name", "N/A")
+        lines.append(f"  {idx:<3}  {state:<12}  {dur_str:>12}  {start_str:<20}  {end_str:<20}  {name}")
+        if state == "FINISHED" and dur_ms:
+            durations_completed.append(dur_ms)
+
+    # ── STABILITY SUMMARY ─────────────────────────────────────────────────
+    lines.append("\n── STABILITY SUMMARY ───────────────────────────────────────────")
+    total = len(matched)
+    finished = sum(1 for j in matched if j.get("state") == "FINISHED")
+    failed = sum(1 for j in matched if j.get("state") == "FAILED")
+    cancelled = sum(1 for j in matched if j.get("state") == "CANCELED")
+    running = sum(1 for j in matched if j.get("state") == "RUNNING")
+
+    success_rate = (finished / total * 100) if total > 0 else 0.0
+    lines.append(f"  Total runs:    {total}")
+    lines.append(f"  Finished:      {finished}  ({success_rate:.0f}% success rate)")
+    lines.append(f"  Failed:        {failed}")
+    lines.append(f"  Cancelled:     {cancelled}")
+    lines.append(f"  Running:       {running}")
+    if durations_completed:
+        avg_dur = sum(durations_completed) / len(durations_completed)
+        lines.append(f"  Avg duration:  {format_duration(int(avg_dur))} (completed runs)")
+
+    # ── FAILURE PATTERN ───────────────────────────────────────────────────
+    failures = [j for j in matched if j.get("state") in ("FAILED", "CANCELED")]
+    lines.append("\n── FAILURE PATTERN ─────────────────────────────────────────────")
+    if failures:
+        for j in failures:
+            end_ms = j.get("end-time", -1)
+            end_str = format_timestamp(end_ms) if end_ms > 0 else "N/A"
+            lines.append(f"  [{j.get('state')}]  {j.get('jid', 'N/A')}  ended {end_str}")
+        lines.append(f"\n  Tip: Use get_job_exceptions(job_id) on any run above for root cause.")
+    else:
+        lines.append("  No failed or cancelled runs.")
+
+    lines.append(sep)
+    output = "\n".join(lines)
+    if len(output) > MAX_OUTPUT_CHARS:
+        output = output[:MAX_OUTPUT_CHARS] + f"\n\n⚠️ Output truncated at {MAX_OUTPUT_CHARS} characters."
+    return output
+
+
+@mcp.tool()
+async def compare_checkpoints(job_id: str) -> str:
+    """
+    Analyse checkpoint trends for a running or recently finished Flink job.
+
+    Fetches the full checkpoint history from GET /jobs/{job_id}/checkpoints
+    and reports:
+    - CHECKPOINT STATS: totals, success rate, latest completed/failed IDs
+    - DURATION TREND: first-half vs second-half average (INCREASING / STABLE / DECREASING)
+    - SIZE TREND: same half-by-half comparison for checkpoint size
+    - OUTLIERS: checkpoints whose duration exceeds 2× the median
+    - FAILURES: list of failed checkpoint IDs with timestamps
+    - ASSESSMENT: HEALTHY / DEGRADING / UNSTABLE
+
+    Args:
+        job_id: The Flink job ID.
+    """
+    url = f"{get_settings()['url']}/jobs/{job_id}/checkpoints"
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"❌ Job not found or no checkpoint data: {job_id}"
+        return f"❌ HTTP Error ({e.response.status_code}): {str(e)}"
+    except Exception as e:
+        logger.error(f"Failed to fetch checkpoints for {job_id}: {e}")
+        return f"❌ Error fetching checkpoints: {str(e)}"
+
+    counts = data.get("counts", {})
+    history = data.get("history", [])
+    latest_completed = data.get("latest", {}).get("completed", {})
+    latest_failed = data.get("latest", {}).get("failed", {})
+    latest_restored = data.get("latest", {}).get("restored", {})
+
+    sep = "=" * 70
+    lines = [sep, f"CHECKPOINT COMPARISON — Job {job_id}", sep]
+
+    # ── CHECKPOINT STATS ──────────────────────────────────────────────────
+    total = counts.get("total", 0)
+    completed = counts.get("completed", 0)
+    failed = counts.get("failed", 0)
+    in_progress = counts.get("in_progress", 0)
+    restored = counts.get("restored", 0)
+    success_rate = (completed / total * 100) if total > 0 else 0.0
+
+    lines.append("\n── CHECKPOINT STATS ────────────────────────────────────────────")
+    lines.append(f"  Total:         {total}")
+    lines.append(f"  Completed:     {completed}  ({success_rate:.0f}% success rate)")
+    lines.append(f"  Failed:        {failed}")
+    lines.append(f"  In Progress:   {in_progress}")
+    lines.append(f"  Restorations:  {restored}")
+
+    if latest_completed:
+        lc_id = latest_completed.get("id", "N/A")
+        lc_dur = latest_completed.get("duration", None)
+        lc_size = latest_completed.get("state_size", None) or latest_completed.get("end_to_end_duration", None)
+        lines.append(f"\n  Latest completed ID: {lc_id}")
+        if lc_dur is not None:
+            lines.append(f"  Latest duration:     {format_duration(lc_dur)}")
+        if lc_size is not None:
+            lines.append(f"  Latest state size:   {format_bytes(lc_size)}")
+
+    if latest_failed:
+        lf_id = latest_failed.get("id", "N/A")
+        lf_ts = latest_failed.get("trigger_timestamp", -1)
+        lines.append(f"\n  Latest failed ID:    {lf_id}  at {format_timestamp(lf_ts) if lf_ts > 0 else 'N/A'}")
+
+    if latest_restored:
+        lr_id = latest_restored.get("id", "N/A")
+        lr_ts = latest_restored.get("restore_timestamp", -1)
+        lines.append(f"  Latest restored ID:  {lr_id}  at {format_timestamp(lr_ts) if lr_ts > 0 else 'N/A'}")
+
+    # ── TREND ANALYSIS (requires history) ────────────────────────────────
+    completed_history = [c for c in history if c.get("status") == "COMPLETED"]
+
+    if len(completed_history) >= 4:
+        durations = [c.get("duration", 0) for c in completed_history]
+        sizes = [c.get("state_size", 0) or 0 for c in completed_history]
+
+        mid = len(durations) // 2
+        first_dur = durations[:mid]
+        second_dur = durations[mid:]
+        avg_first_dur = sum(first_dur) / len(first_dur)
+        avg_second_dur = sum(second_dur) / len(second_dur)
+
+        if avg_first_dur > 0:
+            dur_change_pct = (avg_second_dur - avg_first_dur) / avg_first_dur * 100
+        else:
+            dur_change_pct = 0.0
+
+        if dur_change_pct > 15:
+            dur_trend = "INCREASING"
+        elif dur_change_pct < -15:
+            dur_trend = "DECREASING"
+        else:
+            dur_trend = "STABLE"
+
+        lines.append("\n── DURATION TREND ──────────────────────────────────────────────")
+        lines.append(f"  First half avg:  {format_duration(int(avg_first_dur))}")
+        lines.append(f"  Second half avg: {format_duration(int(avg_second_dur))}")
+        trend_flag = " ⚠️" if dur_trend == "INCREASING" else ""
+        lines.append(f"  Trend:           {dur_trend} ({dur_change_pct:+.0f}%){trend_flag}")
+
+        # Size trend
+        if any(s > 0 for s in sizes):
+            first_size = sizes[:mid]
+            second_size = sizes[mid:]
+            avg_first_size = sum(first_size) / len(first_size)
+            avg_second_size = sum(second_size) / len(second_size)
+
+            if avg_first_size > 0:
+                size_change_pct = (avg_second_size - avg_first_size) / avg_first_size * 100
+            else:
+                size_change_pct = 0.0
+
+            if size_change_pct > 15:
+                size_trend = "INCREASING"
+            elif size_change_pct < -15:
+                size_trend = "DECREASING"
+            else:
+                size_trend = "STABLE"
+
+            lines.append("\n── SIZE TREND ──────────────────────────────────────────────────")
+            lines.append(f"  First half avg:  {format_bytes(int(avg_first_size))}")
+            lines.append(f"  Second half avg: {format_bytes(int(avg_second_size))}")
+            size_flag = " ⚠️" if size_trend == "INCREASING" else ""
+            lines.append(f"  Trend:           {size_trend} ({size_change_pct:+.0f}%){size_flag}")
+
+        # Outliers (duration > 2× median)
+        sorted_durs = sorted(durations)
+        n = len(sorted_durs)
+        median_dur = sorted_durs[n // 2] if n % 2 == 1 else (sorted_durs[n // 2 - 1] + sorted_durs[n // 2]) / 2
+        outliers = [c for c in completed_history if c.get("duration", 0) > 2 * median_dur]
+
+        lines.append("\n── OUTLIERS (duration > 2× median) ────────────────────────────")
+        if outliers:
+            for c in outliers:
+                ts = c.get("trigger_timestamp", -1)
+                lines.append(
+                    f"  CP #{c.get('id', '?')}  duration={format_duration(c.get('duration', 0))}  "
+                    f"at {format_timestamp(ts) if ts > 0 else 'N/A'}"
+                )
+        else:
+            lines.append("  No outliers detected.")
+    else:
+        lines.append("\n  (Not enough completed checkpoints for trend analysis — need ≥4)")
+        dur_trend = "STABLE"
+        size_trend = "STABLE"
+
+    # ── FAILURES ──────────────────────────────────────────────────────────
+    failed_history = [c for c in history if c.get("status") == "FAILED"]
+    lines.append("\n── FAILURES ────────────────────────────────────────────────────")
+    if failed_history:
+        for c in failed_history[-10:]:  # most recent 10
+            ts = c.get("trigger_timestamp", -1)
+            lines.append(f"  CP #{c.get('id', '?')}  at {format_timestamp(ts) if ts > 0 else 'N/A'}")
+    else:
+        lines.append("  No failed checkpoints in history.")
+
+    # ── ASSESSMENT ────────────────────────────────────────────────────────
+    lines.append("\n── ASSESSMENT ──────────────────────────────────────────────────")
+    fail_rate = (failed / total) if total > 0 else 0.0
+
+    if fail_rate > 0.2 or (len(completed_history) >= 4 and dur_trend == "INCREASING" and fail_rate > 0.05):
+        assessment = "UNSTABLE"
+        reason = f"high failure rate ({fail_rate:.0%})" if fail_rate > 0.2 else "failures combined with growing durations"
+    elif len(completed_history) >= 4 and dur_trend == "INCREASING":
+        assessment = "DEGRADING"
+        reason = "checkpoint duration is growing"
+    else:
+        assessment = "HEALTHY"
+        reason = "stable durations and low failure rate"
+
+    lines.append(f"  Status: {assessment} — {reason}")
+    lines.append(sep)
+
+    output = "\n".join(lines)
+    if len(output) > MAX_OUTPUT_CHARS:
+        output = output[:MAX_OUTPUT_CHARS] + f"\n\n⚠️ Output truncated at {MAX_OUTPUT_CHARS} characters."
+    return output

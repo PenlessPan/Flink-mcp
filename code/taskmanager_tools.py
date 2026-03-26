@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, Optional
@@ -580,3 +581,192 @@ async def get_taskmanager_thread_dump(taskmanager_id: str) -> str:
     except Exception as e:
         logger.error(f"Failed to get thread dump for {taskmanager_id}: {e}")
         return f"❌ Error fetching thread dump: {str(e)}"
+
+
+@mcp.tool()
+async def diagnose_taskmanager(taskmanager_id: str) -> str:
+    """
+    Run a full diagnostic on a TaskManager and return a structured health report.
+
+    Concurrently fetches TM details, key JVM/resource metrics, and a thread
+    dump, then presents them in order of diagnostic priority with an overall
+    assessment (HEALTHY / UNDER PRESSURE / CRITICAL).
+
+    Args:
+        taskmanager_id: The TaskManager ID (from list_taskmanagers).
+    """
+    base = get_settings()["url"]
+    tm_url = f"{base}/taskmanagers/{taskmanager_id}"
+    metrics_url = (
+        f"{base}/taskmanagers/{taskmanager_id}/metrics"
+        "?get=Status.JVM.CPU.Load"
+        ",Status.JVM.Memory.Heap.Used"
+        ",Status.JVM.Memory.Heap.Max"
+        ",Status.JVM.Memory.NonHeap.Used"
+        ",Status.JVM.GarbageCollector.G1_Young_Generation.Count"
+        ",Status.JVM.GarbageCollector.G1_Young_Generation.Time"
+        ",Status.JVM.GarbageCollector.G1_Old_Generation.Count"
+        ",Status.JVM.GarbageCollector.G1_Old_Generation.Time"
+        ",Status.JVM.Threads.Count"
+    )
+    thread_url = f"{base}/taskmanagers/{taskmanager_id}/thread-dump"
+
+    async def _get(client, url):
+        try:
+            r = await client.get(url, timeout=10.0)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return None
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            tm_data, metrics_raw, thread_data = await asyncio.gather(
+                _get(client, tm_url),
+                _get(client, metrics_url),
+                _get(client, thread_url),
+            )
+    except Exception as e:
+        logger.error(f"Failed to fetch TM diagnostic data: {e}")
+        return f"❌ Error fetching TaskManager diagnostic data: {str(e)}"
+
+    if tm_data is None:
+        return f"❌ TaskManager not found or unreachable: {taskmanager_id}"
+
+    sep = "=" * 70
+    lines = [sep, f"TASKMANAGER DIAGNOSTIC — {taskmanager_id}", sep]
+
+    # ── 1. BASIC INFO ────────────────────────────────────────────────────
+    lines.append("\n── BASIC INFO ──────────────────────────────────────────────────")
+    lines.append(f"  Path:      {tm_data.get('path', 'N/A')}")
+    lines.append(f"  Data Port: {tm_data.get('dataPort', 'N/A')}")
+    slots_total = tm_data.get("slotsNumber", 0)
+    slots_free = tm_data.get("freeSlots", 0)
+    slots_used = slots_total - slots_free
+    slot_pct = (slots_used / slots_total * 100) if slots_total > 0 else 0
+    lines.append(f"  Slots:     {slots_used}/{slots_total} used ({slot_pct:.0f}%)")
+
+    # ── 2. RESOURCE UTILIZATION ──────────────────────────────────────────
+    lines.append("\n── RESOURCE UTILIZATION ────────────────────────────────────────")
+
+    warnings = []
+
+    # Parse metrics into a lookup
+    metrics_map: Dict[str, Any] = {}
+    if metrics_raw and isinstance(metrics_raw, list):
+        for m in metrics_raw:
+            mid = m.get("id", "")
+            try:
+                val = float(m.get("value", 0))
+            except (TypeError, ValueError):
+                val = 0.0
+            metrics_map[mid] = val
+
+    cpu_load = metrics_map.get("Status.JVM.CPU.Load", None)
+    heap_used = metrics_map.get("Status.JVM.Memory.Heap.Used", None)
+    heap_max = metrics_map.get("Status.JVM.Memory.Heap.Max", None)
+    non_heap_used = metrics_map.get("Status.JVM.Memory.NonHeap.Used", None)
+
+    if cpu_load is not None:
+        cpu_pct = cpu_load * 100
+        cpu_flag = " ⚠️ HIGH" if cpu_pct >= 80 else ""
+        lines.append(f"  CPU Load:      {cpu_pct:.1f}%{cpu_flag}")
+        if cpu_pct >= 80:
+            warnings.append(f"CPU load {cpu_pct:.0f}%")
+
+    if heap_used is not None and heap_max is not None and heap_max > 0:
+        heap_pct = heap_used / heap_max * 100
+        heap_flag = " ⚠️ HIGH" if heap_pct >= 85 else ""
+        lines.append(f"  Heap Memory:   {format_bytes(int(heap_used))} / {format_bytes(int(heap_max))} ({heap_pct:.0f}%){heap_flag}")
+        if heap_pct >= 85:
+            warnings.append(f"heap {heap_pct:.0f}% full")
+    elif tm_data.get("hardware"):
+        hw = tm_data["hardware"]
+        phys = hw.get("physicalMemory", 0)
+        free = hw.get("freeMemory", 0)
+        if phys > 0:
+            mem_pct = (phys - free) / phys * 100
+            mem_flag = " ⚠️ HIGH" if mem_pct >= 85 else ""
+            lines.append(f"  Physical Mem:  {format_bytes(phys - free)} / {format_bytes(phys)} ({mem_pct:.0f}%){mem_flag}")
+            if mem_pct >= 85:
+                warnings.append(f"memory {mem_pct:.0f}% used")
+
+    if non_heap_used is not None:
+        lines.append(f"  Non-Heap Mem:  {format_bytes(int(non_heap_used))}")
+
+    # GC pressure
+    young_time = metrics_map.get("Status.JVM.GarbageCollector.G1_Young_Generation.Time", 0)
+    old_time = metrics_map.get("Status.JVM.GarbageCollector.G1_Old_Generation.Time", 0)
+    young_count = int(metrics_map.get("Status.JVM.GarbageCollector.G1_Young_Generation.Count", 0))
+    old_count = int(metrics_map.get("Status.JVM.GarbageCollector.G1_Old_Generation.Count", 0))
+
+    if young_count or old_count:
+        lines.append(f"  GC (Young):    {young_count} collections, {format_duration(int(young_time))}")
+        lines.append(f"  GC (Old):      {old_count} collections, {format_duration(int(old_time))}")
+        if old_count > 5:
+            warnings.append(f"high old-gen GC ({old_count} collections)")
+
+    thread_count = metrics_map.get("Status.JVM.Threads.Count", None)
+    if thread_count is not None:
+        lines.append(f"  Threads:       {int(thread_count)}")
+
+    # ── 3. THREAD SUMMARY ────────────────────────────────────────────────
+    lines.append("\n── THREAD SUMMARY ──────────────────────────────────────────────")
+
+    if thread_data:
+        threads = thread_data.get("threadInfos", thread_data.get("threads", []))
+        groups: Dict[str, list] = {}
+        for t in threads:
+            state = t.get("threadState", t.get("state", "UNKNOWN"))
+            groups.setdefault(state, []).append(t)
+
+        state_order = ["BLOCKED", "RUNNABLE", "WAITING", "TIMED_WAITING", "TERMINATED", "NEW", "UNKNOWN"]
+        sorted_states = sorted(groups.keys(), key=lambda s: state_order.index(s) if s in state_order else 99)
+
+        lines.append(f"  Total threads: {len(threads)}")
+        summary = "  ".join(f"{s}={len(v)}" for s, v in groups.items())
+        lines.append(f"  By state:      {summary}")
+
+        blocked = groups.get("BLOCKED", [])
+        if blocked:
+            warnings.append(f"{len(blocked)} BLOCKED thread(s)")
+            lines.append(f"\n  🔴 BLOCKED THREADS ({len(blocked)}) — possible deadlock / contention:")
+            for t in blocked[:5]:
+                name = t.get("threadName", t.get("name", "unknown"))
+                lines.append(f"    Thread: {name}")
+                stack = t.get("stackTrace") or t.get("stacktrace") or t.get("stack") or []
+                if isinstance(stack, list):
+                    for frame in stack[:5]:
+                        if isinstance(frame, dict):
+                            cls = frame.get("className", "")
+                            method = frame.get("methodName", "")
+                            file_ = frame.get("fileName", "")
+                            line_ = frame.get("lineNumber", "")
+                            lines.append(f"      at {cls}.{method}({file_}:{line_})")
+                        else:
+                            lines.append(f"      {frame}")
+                elif isinstance(stack, str):
+                    for frame in stack.splitlines()[:5]:
+                        lines.append(f"      {frame}")
+                lines.append("")
+    else:
+        lines.append("  (thread dump unavailable)")
+
+    # ── 4. ASSESSMENT ────────────────────────────────────────────────────
+    lines.append("── ASSESSMENT ──────────────────────────────────────────────────")
+
+    if len(warnings) >= 2 or (warnings and any("BLOCKED" in w for w in warnings)):
+        assessment = "CRITICAL"
+    elif warnings:
+        assessment = "UNDER PRESSURE"
+    else:
+        assessment = "HEALTHY"
+
+    reason = ", ".join(warnings) if warnings else "all systems nominal"
+    lines.append(f"  Status: {assessment} — {reason}")
+    lines.append(sep)
+
+    output = "\n".join(lines)
+    if len(output) > MAX_OUTPUT_CHARS:
+        output = output[:MAX_OUTPUT_CHARS] + f"\n\n⚠️ Output truncated at {MAX_OUTPUT_CHARS} characters."
+    return output

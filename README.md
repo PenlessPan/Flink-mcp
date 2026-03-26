@@ -33,7 +33,7 @@ The connection is validated immediately — the tool pings `/overview` and retur
 - **Resource Management**: Monitor TaskManager resources and JAR file deployments
 - **Metrics Collection**: Access comprehensive job and cluster metrics
 
-### 🔧 Available Tools (28 total):
+### 🔧 Available Tools (30 total):
 
 **Connection**
 | Tool | Description |
@@ -45,16 +45,17 @@ The connection is validated immediately — the tool pings `/overview` and retur
 | Tool | Description |
 |------|-------------|
 | `get_cluster_info` | Overview of the Flink cluster: jobs, slots, TaskManagers |
-| `get_cluster_config` | REST/web UI config (version, timezone, refresh interval) |
-| `list_datasets` | Intermediate batch datasets on the cluster |
 | `list_jar_files` | Uploaded JAR files |
+| `get_cluster_health` | Full cluster health snapshot: slot capacity, TM utilization, active jobs, failures, overall assessment |
 
 **Jobs**
 | Tool | Description |
 |------|-------------|
-| `list_jobs` | All jobs with status (via `/jobs/overview`) |
-| `list_job_ids` | Lightweight job-ID and status list (via `/jobs`) |
+| `list_jobs` | All jobs with status |
 | `get_job_details` | Comprehensive job details: config, vertices, metrics, plan |
+| `diagnose_job` | **Unified health report** — concurrently fetches exceptions, metrics, checkpoint health, and job details; returns a single prioritised report with a one-line health summary |
+| `get_job_history` | Run history for a job by name: all runs with states, stability summary, failure pattern |
+| `compare_checkpoints` | Checkpoint trend analysis: duration/size trends, outliers, failure list, HEALTHY/DEGRADING/UNSTABLE assessment |
 | `get_job_metrics` | Diagnostic metrics report: uptime, restarts, checkpoint stats |
 | `get_job_exceptions` | Root cause and exception history for a job |
 | `get_job_accumulators` | User-defined accumulators for a job |
@@ -70,9 +71,9 @@ The connection is validated immediately — the tool pings `/overview` and retur
 **Vertices / Operators**
 | Tool | Description |
 |------|-------------|
-| `get_vertex_info` | Vertex info by category: `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators` |
-| `get_vertex_details` | Full per-subtask breakdown with I/O metrics |
+| `get_vertex_details` | Full per-subtask breakdown with I/O metrics and user accumulators |
 | `get_vertex_flamegraph` | CPU flame graph data (Flink 1.17+, requires `rest.profiling.enabled: true`) |
+| `find_bottleneck` | Identify the bottleneck operator by backpressure ranking; includes root cause candidate and recommendations |
 
 **TaskManagers**
 | Tool | Description |
@@ -81,6 +82,7 @@ The connection is validated immediately — the tool pings `/overview` and retur
 | `get_taskmanager_details` | Deep-dive into a single TaskManager including real-time metrics |
 | `get_taskmanager_metrics` | Query or list available metrics for a TaskManager |
 | `get_taskmanager_thread_dump` | JVM thread dump grouped by state (BLOCKED threads highlighted) |
+| `diagnose_taskmanager` | Full TM health report: CPU, heap, GC pressure, thread summary, HEALTHY/UNDER PRESSURE/CRITICAL assessment |
 
 **JobManager**
 | Tool | Description |
@@ -170,7 +172,8 @@ Human: Show me all running jobs and their performance metrics
 ### Troubleshooting a failing job
 ```
 Human: My job abc123 keeps restarting — what's wrong?
-→ get_job_exceptions("abc123"), get_job_metrics("abc123"), get_job_checkpoints("abc123")
+→ diagnose_job("abc123")
+   Returns: health summary + exceptions + metrics + checkpoint health + job details in one call
 ```
 
 ### Resource investigation
@@ -193,14 +196,15 @@ code/
 ├── app.py             # Shared FastMCP instance
 ├── utils.py           # format_bytes, format_duration, format_timestamp, to_num, index_by_id, chunk
 ├── connection.py      # FLINK_CONNECTION state, get_settings(), initialize/status tools
-├── cluster_tools.py   # get_cluster_info, get_cluster_config, list_datasets, list_jar_files
-├── job_tools.py       # list_jobs, list_job_ids, get_job_details, get_job_metrics,
+├── cluster_tools.py   # get_cluster_info, list_jar_files, get_cluster_health
+├── job_tools.py       # list_jobs, get_job_details, diagnose_job, get_job_metrics,
 │                      # get_job_exceptions, get_job_accumulators, get_job_plan,
-│                      # get_job_checkpoint_config
+│                      # get_job_checkpoint_config, get_job_history, compare_checkpoints
 ├── checkpoint_tools.py# get_job_checkpoints, get_checkpoint_details
-├── vertex_tools.py    # get_vertex_info, get_vertex_details, get_vertex_flamegraph
+├── vertex_tools.py    # get_vertex_details, get_vertex_flamegraph, find_bottleneck
 ├── taskmanager_tools.py # list_taskmanagers, get_taskmanager_details,
-│                        # get_taskmanager_metrics, get_taskmanager_thread_dump
+│                        # get_taskmanager_metrics, get_taskmanager_thread_dump,
+│                        # diagnose_taskmanager
 ├── jobmanager_tools.py# get_jobmanager_metrics, get_jobmanager_config,
 │                      # get_jobmanager_environment
 └── log_tools.py       # list_flink_logs, read_flink_logs
