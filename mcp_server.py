@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 from code.app import mcp
@@ -63,11 +64,13 @@ def main():
         logger.info("-" * 60)
         logger.info("  📄 list_flink_logs: List available log files on JobManager/TaskManager")
         logger.info("  📜 read_flink_logs: Read a log file with optional tail/filter support")
+        host = os.environ.get("MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("MCP_PORT", "9090"))
         logger.info("=" * 60)
-        logger.info("Server starting on http://127.0.0.1:9090")
+        logger.info(f"Server starting on http://{host}:{port}")
         logger.info("=" * 60)
 
-        mcp.run(transport="streamable-http", host="127.0.0.1", port=9090)
+        mcp.run(transport="streamable-http", host=host, port=port)
     except KeyboardInterrupt:
         logger.info("\n" + "=" * 60)
         logger.info("Server stopped by user")
