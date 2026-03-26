@@ -10,17 +10,19 @@ The Apache Flink MCP Server bridges the gap between AI assistants and Apache Fli
 
 ## Configuration
 
-Copy `config.yaml.example` to `config.yaml` and edit it before running the server:
+No configuration file is required. The server starts without any pre-configured connection. Use the `initialize_flink_connection` tool to point it at your cluster at runtime:
 
-```bash
-cp config.yaml.example config.yaml
+```
+initialize_flink_connection(flink_url="http://localhost:8081")
 ```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `flink.url` | string | `http://localhost:8081` | Base URL of the Flink REST API |
-| `flink.tls_verify` | boolean | `true` | Verify TLS certificates. Set to `false` for self-signed certs. |
-| `server.max_output_chars` | integer | `50000` | Maximum characters returned by any tool. Longer responses are truncated. |
+The connection is validated immediately — the tool pings `/overview` and returns an error if the cluster is unreachable. All other tools will raise a clear error if called before the connection is initialized.
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| Transport | `streamable-http` | HTTP server on `127.0.0.1:9090` |
+| TLS verification | disabled | `verify=False` on all requests (suits self-signed certs) |
+| Max output chars | `50000` | Longer responses are truncated automatically |
 
 ## Features
 
@@ -31,32 +33,67 @@ cp config.yaml.example config.yaml
 - **Resource Management**: Monitor TaskManager resources and JAR file deployments
 - **Metrics Collection**: Access comprehensive job and cluster metrics
 
-### 🔧 Available Tools:
+### 🔧 Available Tools (28 total):
 
-1. `get_cluster_info` – Overview of the Flink cluster
-2. `list_jobs` – List all Flink jobs with status
-3. `get_job_details` – Comprehensive job details by ID
-4. `get_job_exceptions` – Fetch job-level exceptions
-5. `get_job_metrics` – Fetch metrics for a job
-6. `list_taskmanagers` – List TaskManagers with resources
-7. `list_jar_files` – List uploaded JAR files
-8. `get_job_checkpoints` – Checkpoint history and counts for a job
-9. `get_checkpoint_details` – Per-subtask breakdown for a specific checkpoint
-10. `get_vertex_info(job_id, vertex_id, info_category)` – Vertex info by category: `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators`
-11. `get_job_accumulators` – User-defined accumulators for a job
-12. `get_jobmanager_metrics` – List or query JobManager metrics
-13. `get_jobmanager_config` – Full effective cluster configuration
-14. `get_jobmanager_environment` – JVM and environment info from the JobManager
-15. `list_flink_logs` – List available log files on JobManager or TaskManager
-16. `read_flink_logs` – Read a log file with optional tail/filter support
-17. `list_job_ids` – Lightweight job-ID and status list
-18. `get_job_plan` – Dataflow DAG with nodes, edges, and ship strategies
-19. `get_job_checkpoint_config` – Active checkpoint configuration for a job
-20. `get_vertex_details` – Full per-subtask breakdown for a vertex
-21. `get_vertex_flamegraph` – CPU flame graph data for a vertex (Flink 1.17+)
-22. `get_taskmanager_thread_dump` – JVM thread dump grouped by state
-23. `get_cluster_config` – REST/web UI config (version, timezone, refresh)
-24. `list_datasets` – Intermediate batch datasets on the cluster
+**Connection**
+| Tool | Description |
+|------|-------------|
+| `initialize_flink_connection` | Connect to a Flink cluster by URL — must be called first |
+| `get_connection_status` | Check whether a connection is active and show the current URL |
+
+**Cluster**
+| Tool | Description |
+|------|-------------|
+| `get_cluster_info` | Overview of the Flink cluster: jobs, slots, TaskManagers |
+| `get_cluster_config` | REST/web UI config (version, timezone, refresh interval) |
+| `list_datasets` | Intermediate batch datasets on the cluster |
+| `list_jar_files` | Uploaded JAR files |
+
+**Jobs**
+| Tool | Description |
+|------|-------------|
+| `list_jobs` | All jobs with status (via `/jobs/overview`) |
+| `list_job_ids` | Lightweight job-ID and status list (via `/jobs`) |
+| `get_job_details` | Comprehensive job details: config, vertices, metrics, plan |
+| `get_job_metrics` | Diagnostic metrics report: uptime, restarts, checkpoint stats |
+| `get_job_exceptions` | Root cause and exception history for a job |
+| `get_job_accumulators` | User-defined accumulators for a job |
+| `get_job_plan` | Dataflow DAG with nodes, edges, and ship strategies |
+| `get_job_checkpoint_config` | Active checkpoint configuration for a job |
+
+**Checkpoints**
+| Tool | Description |
+|------|-------------|
+| `get_job_checkpoints` | Checkpoint history, counts, and summary for a job |
+| `get_checkpoint_details` | Per-subtask breakdown for a specific checkpoint |
+
+**Vertices / Operators**
+| Tool | Description |
+|------|-------------|
+| `get_vertex_info` | Vertex info by category: `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators` |
+| `get_vertex_details` | Full per-subtask breakdown with I/O metrics |
+| `get_vertex_flamegraph` | CPU flame graph data (Flink 1.17+, requires `rest.profiling.enabled: true`) |
+
+**TaskManagers**
+| Tool | Description |
+|------|-------------|
+| `list_taskmanagers` | All TaskManagers with slot, memory, and CPU details |
+| `get_taskmanager_details` | Deep-dive into a single TaskManager including real-time metrics |
+| `get_taskmanager_metrics` | Query or list available metrics for a TaskManager |
+| `get_taskmanager_thread_dump` | JVM thread dump grouped by state (BLOCKED threads highlighted) |
+
+**JobManager**
+| Tool | Description |
+|------|-------------|
+| `get_jobmanager_metrics` | Query or list available JobManager metrics |
+| `get_jobmanager_config` | Full effective cluster configuration grouped by key prefix |
+| `get_jobmanager_environment` | JVM version, heap size, classpath, and environment variables |
+
+**Logs**
+| Tool | Description |
+|------|-------------|
+| `list_flink_logs` | Available log files on the JobManager or a TaskManager |
+| `read_flink_logs` | Read a log file with optional `tail`, `level_filter`, and `keyword` support |
 
 ---
 
@@ -72,122 +109,122 @@ cp config.yaml.example config.yaml
 ### Prerequisites
 - Apache Flink cluster (running and accessible)
 - Python 3.8 or higher
-- MCP-compatible client (Claude Desktop, Continue etc.)
+- MCP-compatible client (Claude Desktop, Continue, etc.)
 
+### Setup
+
+```bash
+pip install -r requirements.txt
+python mcp_server.py
+```
+
+The server starts on `http://127.0.0.1:9090`. No config file needed.
 
 ### Client Configuration
 
 #### Continue.dev
 Add to your Continue configuration (`Flink-mcp-server.yaml`):
 ```yaml
-name: Sample MCP
+name: Apache Flink MCP
 version: 0.0.1
 schema: v1
 mcpServers:
   - name: Flink MCP Server
     type: streamable-http
-    url:   http://127.0.0.1:9090/mcp/ 
+    url: http://127.0.0.1:9090/mcp/
+```
+
+#### Claude Desktop
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "flink": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:9090/mcp/"
+    }
+  }
+}
 ```
 
 ## Usage Examples
 
-### Basic Cluster Monitoring
+### First step: connect to your cluster
+```
+initialize_flink_connection(flink_url="http://localhost:8081")
+→ ✓ Successfully connected to Flink cluster at http://localhost:8081
+```
+
+### Basic cluster monitoring
 ```
 Human: What's the status of my Flink cluster?
-AI: I'll check your Flink cluster status for you.
-[Uses get_cluster_info tool to fetch cluster overview]
+→ get_cluster_info
 ```
 
-### Job Analysis
+### Job analysis
 ```
 Human: Show me all running jobs and their performance metrics
-AI: Let me get the current jobs and their metrics.
-[Uses list_jobs and get_job_metrics tools]
+→ list_jobs, then get_job_metrics for each job of interest
 ```
 
-### Troubleshooting
+### Troubleshooting a failing job
 ```
-Human: My job with ID abc123 is failing. Can you help me debug it?
-AI: I'll check the job details and any exceptions for job abc123.
-[Uses get_job_details and get_job_exceptions tools]
-```
-
-### Resource Management
-```
-Human: How are my TaskManager resources being utilized?
-AI: Let me check your TaskManager status and resource allocation.
-[Uses list_taskmanagers tool]
+Human: My job abc123 keeps restarting — what's wrong?
+→ get_job_exceptions("abc123"), get_job_metrics("abc123"), get_job_checkpoints("abc123")
 ```
 
-## API Reference
+### Resource investigation
+```
+Human: Which TaskManager is under memory pressure?
+→ list_taskmanagers, then get_taskmanager_details for the suspect node
+```
 
-### Available MCP Tools
+### Thread dump for deadlock diagnosis
+```
+Human: A TaskManager seems stuck. Get a thread dump.
+→ get_taskmanager_thread_dump("172.20.0.3:38373-66c42c")
+```
 
-#### `get_cluster_info`
-**Description**: Fetch an overview of the Flink cluster including jobs, slots, and TaskManagers.
-**Parameters**: None
-**Returns**: Cluster overview with resource information
+## Project Structure
 
-#### `list_jobs`
-**Description**: List all current and recent Flink jobs with their status.
-**Parameters**: None
-**Returns**: List of jobs with status, start time, and duration
-
-#### `get_job_details`
-**Description**: Get detailed information about a specific Flink job.
-**Parameters**:
-- `job_id` (string, required): The unique identifier of the Flink job
-
-#### `list_taskmanagers`
-**Description**: List all registered TaskManagers in the cluster.
-**Parameters**: None
-**Returns**: List of TaskManagers with resource information
-
-#### `get_job_exceptions`
-**Description**: Fetch exceptions that occurred in the specified job.
-**Parameters**:
-- `job_id` (string, required): The unique identifier of the Flink job
-
-#### `list_jar_files`
-**Description**: List all uploaded JAR files in the Flink cluster.
-**Parameters**: None
-**Returns**: List of available JAR files
-
-#### `get_job_metrics`
-**Description**: Fetch selected useful metrics for a running Flink job.
-**Parameters**:
-- `job_id` (string, required): The unique identifier of the Flink job
-
-
----
-
-#### `get_vertex_info`
-**Description**: Retrieve information about a specific job vertex / operator.
-**Parameters**:
-- `job_id` (string, required): The Flink job ID
-- `vertex_id` (string, required): The vertex (operator) ID
-- `info_category` (string, required): One of `backpressure`, `metrics`, `subtask_times`, `taskmanager_stats`, `accumulators`
+```
+mcp_server.py          # Entry point — registers tools, starts server
+code/
+├── app.py             # Shared FastMCP instance
+├── utils.py           # format_bytes, format_duration, format_timestamp, to_num, index_by_id, chunk
+├── connection.py      # FLINK_CONNECTION state, get_settings(), initialize/status tools
+├── cluster_tools.py   # get_cluster_info, get_cluster_config, list_datasets, list_jar_files
+├── job_tools.py       # list_jobs, list_job_ids, get_job_details, get_job_metrics,
+│                      # get_job_exceptions, get_job_accumulators, get_job_plan,
+│                      # get_job_checkpoint_config
+├── checkpoint_tools.py# get_job_checkpoints, get_checkpoint_details
+├── vertex_tools.py    # get_vertex_info, get_vertex_details, get_vertex_flamegraph
+├── taskmanager_tools.py # list_taskmanagers, get_taskmanager_details,
+│                        # get_taskmanager_metrics, get_taskmanager_thread_dump
+├── jobmanager_tools.py# get_jobmanager_metrics, get_jobmanager_config,
+│                      # get_jobmanager_environment
+└── log_tools.py       # list_flink_logs, read_flink_logs
+```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+**Not connected error**
+All tools return a clear error if called before `initialize_flink_connection`. Call it first with your cluster URL.
 
-**Connection Failed**
-- Verify Flink cluster is running and accessible
-- Ensure network connectivity to Flink JobManager
+**Connection failed**
+- Confirm the Flink REST API is reachable: `curl http://<host>:8081/overview`
+- Check that `rest.bind-address` is not restricted to localhost inside the cluster
 
-**Permission Errors**
-- Verify Flink REST API is enabled
-- Check if authentication is required for your Flink setup
+**Permission errors**
+- Verify the Flink REST API is enabled (`rest.enabled: true`)
+- Check whether your setup requires authentication headers
 
-
-### Debug Mode
-Enable detailed logging:
+**Debug logging**
 ```bash
-export LOG_LEVEL=DEBUG
 python mcp_server.py
+# Logs go to stderr at INFO level by default
 ```
 
 ## Contributing

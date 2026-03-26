@@ -1,5 +1,7 @@
 .continue/
 fenv/
 .vscode/
-clients/claude/__pycache__/
+__pycache__/
+**/__pycache__/
+*.pyc
 config.yaml
