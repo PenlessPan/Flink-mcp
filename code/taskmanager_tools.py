@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 import httpx
 
@@ -376,7 +376,7 @@ async def get_taskmanager_details(taskmanager_id: str) -> str:
 @mcp.tool()
 async def get_taskmanager_metrics(
     taskmanager_id: str,
-    metric_names: Optional[str] = None
+    metric_names: str = None
 ) -> str:
     """Get specific metrics for a TaskManager.
 

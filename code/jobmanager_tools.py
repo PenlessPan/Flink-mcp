@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import httpx
 
@@ -11,7 +10,7 @@ logger = logging.getLogger("flink-mcp-server")
 
 
 @mcp.tool()
-async def get_jobmanager_metrics(metric_names: Optional[str] = None) -> str:
+async def get_jobmanager_metrics(metric_names: str = None) -> str:
     """Get metrics for the JobManager.
 
     Args:

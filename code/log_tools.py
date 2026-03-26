@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import httpx
 
@@ -13,7 +12,7 @@ logger = logging.getLogger("flink-mcp-server")
 @mcp.tool()
 async def list_flink_logs(
     target: str = "jobmanager",
-    taskmanager_id: Optional[str] = None
+    taskmanager_id: str = None
 ) -> str:
     """
     List available log files on the JobManager or a specific TaskManager.
@@ -70,10 +69,10 @@ async def list_flink_logs(
 async def read_flink_logs(
     log_file: str,
     target: str = "jobmanager",
-    taskmanager_id: Optional[str] = None,
-    tail: Optional[int] = None,
-    level_filter: Optional[str] = None,
-    keyword: Optional[str] = None
+    taskmanager_id: str = None,
+    tail: int = None,
+    level_filter: str = None,
+    keyword: str = None
 ) -> str:
     """
     Read the content of a Flink log file from the JobManager or a TaskManager,
